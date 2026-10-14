@@ -155,6 +155,7 @@ namespace WorldBuilder.Lib {
             project.DocumentManager = CompositeProvider.GetRequiredService<DocumentManager>();
             project.DocumentManager.SetCacheDirectory(cacheDir);
             project.DocumentManager.Dats = project.DatReaderWriter;
+            project.DocumentManager.SkipDatStatics = project.OriginalStaticsRemoved;
 
             var dbCtx = CompositeProvider.GetRequiredService<DocumentDbContext>();
             dbCtx.InitializeSqliteAsync().Wait();

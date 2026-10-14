@@ -93,6 +93,7 @@
                     <MenuItem Command="{Binding LandscapeTogglePerformanceOverlayCommand}" Header="Performance Overlay" />
                     <MenuItem Command="{Binding LandscapeClearCacheCommand}" Header="Clear Cache" />
                     <MenuItem Command="{Binding LandscapeFreshStartCommand}" Header="Fresh Start" IsEnabled="{Binding CanPerformWholeWorldLandscapeMutation}" />
+                    <MenuItem Command="{Binding LandscapeRemoveOriginalStaticsCommand}" Header="Remove Original Buildings" IsEnabled="{Binding CanPerformWholeWorldLandscapeMutation}" />
                     <MenuItem Command="{Binding LandscapeImportHeightmapCommand}" Header="Import Heightmap..." IsEnabled="{Binding CanPerformWholeWorldLandscapeMutation}" />
                     <Separator />
                     <MenuItem Command="{Binding PushLandblockLiveCommand}" Header="Test This Landblock" />

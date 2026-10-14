@@ -97,6 +97,36 @@ namespace WorldBuilder.Shared.Documents {
             return null;
         }
 
+        /// <summary>
+        /// Returns the active document if one is open; otherwise builds an instance from storage
+        /// (or an empty one when <paramref name="loadFromStorage"/> is false or nothing is stored)
+        /// without adding it to the active cache or creating a database row. Used by export to
+        /// reach documents that streamed out of view.
+        /// </summary>
+        public async Task<T?> OpenDetachedAsync<T>(string documentId, bool loadFromStorage = true) where T : BaseDocument {
+            if (_activeDocs.TryGetValue(documentId, out var active))
+                return active as T;
+
+            var docInstance = (T?)Activator.CreateInstance(typeof(T), _logger);
+            if (docInstance == null) return null;
+            docInstance.Id = documentId;
+            docInstance.SetCacheDirectory(_cacheDirectory);
+
+            if (loadFromStorage) {
+                var dbDoc = await DocumentStorageService.GetDocumentAsync(documentId).ConfigureAwait(false);
+                if (dbDoc != null && !docInstance.LoadFromProjection(dbDoc.Data)) {
+                    _logger.LogError("Failed to load projection for document {DocumentId}", documentId);
+                    return null;
+                }
+            }
+
+            if (!await docInstance.InitAsync(Dats, this).ConfigureAwait(false)) {
+                _logger.LogError("Failed to init document {DocumentId} of type {Type}", documentId, typeof(T).Name);
+                return null;
+            }
+            return docInstance;
+        }
+
         private async Task<BaseDocument?> CreateOrLoadDocumentInternalAsync(string documentId, Type docType) {
             var docTypeName = docType.Name;
 

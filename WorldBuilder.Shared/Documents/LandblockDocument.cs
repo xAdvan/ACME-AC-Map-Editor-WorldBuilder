@@ -152,6 +152,7 @@ namespace WorldBuilder.Shared.Documents {
             // Track which StaticObjects have been matched to an original building
             var consumed = new HashSet<int>();
             var originalNumCells = lbi.NumCells;
+            var deletedCellIds = new HashSet<ushort>();
 
             // For each original building, try to find a matching StaticObject.
             // If found: update the building's position (preserving portal/cell data).
@@ -212,12 +213,11 @@ namespace WorldBuilder.Shared.Documents {
                 }
                 else {
                     // Building was deleted -- count its EnvCells for NumCells adjustment
-                    var deletedCellIds = CollectBuildingCellIds(building, datwriter, lbId);
-                    if (deletedCellIds.Count > 0) {
-                        _logger.LogInformation("[LBDoc]   Building 0x{Id:X8} DELETED — {CellCount} EnvCells orphaned (will be cleaned up in Phase 2)",
-                            building.ModelId, deletedCellIds.Count);
-                        // Safe subtraction: NumCells is uint; decrement without underflow.
-                        lbi.NumCells = (uint)Math.Max(0L, (long)lbi.NumCells - deletedCellIds.Count);
+                    var buildingCellIds = CollectBuildingCellIds(building, datwriter, lbId);
+                    if (buildingCellIds.Count > 0) {
+                        _logger.LogInformation("[LBDoc]   Building 0x{Id:X8} DELETED — {CellCount} EnvCells orphaned",
+                            building.ModelId, buildingCellIds.Count);
+                        deletedCellIds.UnionWith(buildingCellIds);
                     }
                     else {
                         _logger.LogInformation("[LBDoc]   Building 0x{Id:X8} DELETED (no EnvCells)", building.ModelId);
@@ -227,6 +227,17 @@ namespace WorldBuilder.Shared.Documents {
 
             lbi.Buildings.Clear();
             lbi.Buildings.AddRange(survivingBuildings);
+
+            // Cells are numbered 0x0100..0x0100+NumCells-1 and shared with any dungeon in this
+            // landblock, so only drop deleted building cells from the end of that range. Cells
+            // numbered after them (dungeon rooms, other buildings) keep their numbers; lowering
+            // NumCells by the deleted count would cut those off and let new buildings overwrite them.
+            if (deletedCellIds.Count > 0) {
+                uint numCells = lbi.NumCells;
+                while (numCells > 0 && deletedCellIds.Contains((ushort)(0x0100 + numCells - 1)))
+                    numCells--;
+                lbi.NumCells = numCells;
+            }
 
             if (lbi.NumCells != originalNumCells) {
                 _logger.LogInformation("[LBDoc]   NumCells adjusted: {Old} -> {New}", originalNumCells, lbi.NumCells);
@@ -584,6 +595,35 @@ namespace WorldBuilder.Shared.Documents {
             _data.StaticObjects.RemoveAt(index);
             MarkDirty();
             return true;
+        }
+
+        /// <summary>
+        /// Removes the statics that came from this landblock's base DAT entry (original objects
+        /// and buildings), matched by model ID and horizontal position. Statics the project
+        /// placed are kept. Returns the number removed.
+        /// </summary>
+        public int RemoveDatOriginals(IDatReaderWriter datreader) {
+            var lbId = uint.Parse(Id.Replace("landblock_", ""), System.Globalization.NumberStyles.HexNumber);
+            if (!datreader.TryGet<LandBlockInfo>(lbId << 16 | 0xFFFE, out var lbi)) return 0;
+
+            var originals = lbi.Objects.Select(o => (o.Id, Pos: Offset(o.Frame.Origin, lbId)))
+                .Concat(lbi.Buildings.Select(b => (Id: b.ModelId, Pos: Offset(b.Frame.Origin, lbId))));
+
+            int removed = 0;
+            foreach (var (id, pos) in originals) {
+                // Height is ignored: terrain edits may have moved originals up or down.
+                int idx = _data.StaticObjects.FindIndex(o => o.Id == id &&
+                    Vector2.Distance(new Vector2(o.Origin.X, o.Origin.Y), new Vector2(pos.X, pos.Y)) < 0.5f);
+                if (idx < 0) continue;
+                _data.StaticObjects.RemoveAt(idx);
+                removed++;
+            }
+
+            // Persist and export the result even when nothing matched, so this landblock
+            // never falls back to its DAT statics again.
+            _loadedFromProjection = true;
+            MarkDirty();
+            return removed;
         }
 
         /// <summary>

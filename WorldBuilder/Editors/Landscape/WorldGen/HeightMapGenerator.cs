@@ -29,8 +29,11 @@ namespace WorldBuilder.Editors.Landscape.WorldGen {
         /// Uses domain warping and per-landmass noise for organic, non-circular shapes.
         /// Coastlines rise gradually out of the sea along most of their length, with
         /// occasional stretches of sea cliffs.
+        /// <paramref name="distanceToSea"/> receives, for each land vertex, its distance in
+        /// vertices to the nearest sea vertex (0 for sea vertices).
         /// </summary>
-        public static float[,] Generate(WorldGeneratorParams p, SimplexNoise noise, int verticesX, int verticesY, Random rng, float[] landHeightTable) {
+        public static float[,] Generate(WorldGeneratorParams p, SimplexNoise noise, int verticesX, int verticesY, Random rng,
+            float[] landHeightTable, out float[,] distanceToSea) {
             var landmasses = PlaceLandmasses(p, verticesX, verticesY, rng);
             var map = new float[verticesX, verticesY];
             var isLand = new bool[verticesX, verticesY];
@@ -66,6 +69,7 @@ namespace WorldBuilder.Editors.Landscape.WorldGen {
             // true distance to the shoreline so slopes are controlled in world units.
             var distToSea = DistanceTransform(isLand, sourceIsLand: false);
             var distToLand = DistanceTransform(isLand, sourceIsLand: true);
+            distanceToSea = distToSea;
 
             float heightRange = landHeightTable[^1] - landHeightTable[0];
             float mountainScale = Math.Max(p.MountainScale, 0.1f);

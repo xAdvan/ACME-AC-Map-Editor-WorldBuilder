@@ -186,6 +186,14 @@ namespace WorldBuilder.Shared.Models {
         public List<OutdoorInstancePlacement> OutdoorInstancePlacements { get; set; } = new();
 
         /// <summary>
+        /// True once the world's original DAT buildings and static objects have been removed
+        /// (Fresh Start, or Remove Original Buildings). Landblocks then never load statics from
+        /// the base DATs, and export strips them from every landblock the project didn't place
+        /// content in. Dungeon cells are kept.
+        /// </summary>
+        public bool OriginalStaticsRemoved { get; set; }
+
+        /// <summary>
         /// Called during export to write custom textures and update Region.
         /// Set by the UI layer (TextureImportService) since image decoding requires platform deps.
         /// </summary>
@@ -206,6 +214,50 @@ namespace WorldBuilder.Shared.Models {
         /// </summary>
         [JsonIgnore]
         public Action<string, IReadOnlyList<DungeonDocument>>? OnExportDungeonInstances { get; set; }
+
+        /// <summary>
+        /// Landblock documents whose static objects must be written on export:
+        /// open documents with edits, saved documents that have streamed out of view
+        /// (e.g. world-generated buildings in landblocks not currently loaded), and, once the
+        /// original statics were removed, every other landblock that still has DAT objects or
+        /// buildings (exported empty, which keeps dungeon cells).
+        /// </summary>
+        private List<(string DocId, LandblockDocument Doc)> CollectLandblockExports() {
+            var result = new Dictionary<string, LandblockDocument>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (docId, doc) in DocumentManager.ActiveDocs) {
+                if (doc is LandblockDocument lbDoc && (lbDoc.IsDirty || lbDoc.LoadedFromProjection))
+                    result[docId] = lbDoc;
+            }
+
+            var storedIds = DocumentManager.DocumentStorageService.GetDocumentIdsByPrefixAsync("landblock_").GetAwaiter().GetResult();
+            foreach (var docId in storedIds) {
+                if (result.ContainsKey(docId) || DocumentManager.ActiveDocs.ContainsKey(docId)) continue;
+                var lbDoc = DocumentManager.OpenDetachedAsync<LandblockDocument>(docId).GetAwaiter().GetResult();
+                if (lbDoc != null && lbDoc.LoadedFromProjection)
+                    result[docId] = lbDoc;
+            }
+
+            if (OriginalStaticsRemoved) {
+                for (uint x = 0; x < 255; x++) {
+                    for (uint y = 0; y < 255; y++) {
+                        var lbKey = (ushort)((x << 8) | y);
+                        var docId = $"landblock_{lbKey:X4}";
+                        if (result.ContainsKey(docId)) continue;
+
+                        var infoId = (uint)(lbKey << 16) | 0xFFFE;
+                        if (!DatReaderWriter.TryGet<LandBlockInfo>(infoId, out var lbi)) continue;
+                        if (lbi.Objects.Count == 0 && lbi.Buildings.Count == 0) continue;
+
+                        var lbDoc = DocumentManager.OpenDetachedAsync<LandblockDocument>(docId, loadFromStorage: false).GetAwaiter().GetResult();
+                        if (lbDoc != null)
+                            result[docId] = lbDoc;
+                    }
+                }
+            }
+
+            return result.Select(kv => (kv.Key, kv.Value)).ToList();
+        }
 
         public bool ExportDats(string exportDirectory, int portalIteration, Action<string>? onProgress = null) {
             if (DatMode == DatProjectMode.LegacyPreTod) {
@@ -260,12 +312,11 @@ namespace WorldBuilder.Shared.Models {
                 }
             }
 
-            bool hasDocumentExports = false;
+            onProgress?.Invoke("Collecting landblock objects...");
+            var landblockExports = CollectLandblockExports();
+
+            bool hasDocumentExports = landblockExports.Count > 0;
             foreach (var (_, doc) in DocumentManager.ActiveDocs) {
-                if (doc is LandblockDocument lbDoc && (lbDoc.IsDirty || lbDoc.LoadedFromProjection)) {
-                    hasDocumentExports = true;
-                    break;
-                }
                 if (doc is DungeonDocument) {
                     hasDocumentExports = true;
                     break;
@@ -448,14 +499,17 @@ namespace WorldBuilder.Shared.Models {
             // Export static object changes from LandblockDocuments, dungeon data, and portal table edits
             // Only save dirty documents -- streamed-in but unmodified docs must not overwrite
             // the base DAT content (which may have been repositioned above).
+            foreach (var (docId, lbDoc) in landblockExports) {
+                if (lbDoc.SaveToDats(writer, portalIteration).GetAwaiter().GetResult() &&
+                    TryParseLandblockDocId(docId, out ushort lbKey)) {
+                    checksumTargets.TrackCell((uint)(lbKey << 16) | 0xFFFF);
+                    checksumTargets.TrackCell((uint)(lbKey << 16) | 0xFFFE);
+                }
+            }
+
             foreach (var (docId, doc) in DocumentManager.ActiveDocs) {
-                if (doc is LandblockDocument lbDoc) {
-                    if (!lbDoc.IsDirty && !lbDoc.LoadedFromProjection) continue;
-                    if (lbDoc.SaveToDats(writer, portalIteration).GetAwaiter().GetResult() &&
-                        TryParseLandblockDocId(docId, out ushort lbKey)) {
-                        checksumTargets.TrackCell((uint)(lbKey << 16) | 0xFFFF);
-                        checksumTargets.TrackCell((uint)(lbKey << 16) | 0xFFFE);
-                    }
+                if (doc is LandblockDocument) {
+                    continue; // exported above
                 }
                 else if (doc is DungeonDocument dungeonDoc) {
                     var validation = dungeonDoc.ValidateComprehensive();

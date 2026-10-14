@@ -221,6 +221,8 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
                 Console.WriteLine($"[ObjectBrowser] Error scanning building IDs: {ex}");
                 _buildingIdsLoaded = true; // Mark loaded so UI doesn't stay stuck on "Loading..."
             }
+            // The list may already be showing "Loading building list..." — refresh it now.
+            Dispatcher.UIThread.Post(() => { if (ShowBuildingsOnly) ApplyFilter(); });
         }
 
         private void LoadSceneryIds() {
@@ -260,6 +262,7 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
                 Console.WriteLine($"[ObjectBrowser] Error scanning scenery IDs: {ex}");
                 _sceneryIdsLoaded = true;
             }
+            Dispatcher.UIThread.Post(() => { if (ShowSceneryOnly) ApplyFilter(); });
         }
 
         partial void OnSearchTextChanged(string value) { _displayLimit = BatchSize; ApplyFilter(); }

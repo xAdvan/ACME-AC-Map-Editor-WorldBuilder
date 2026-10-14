@@ -805,12 +805,65 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
             TerrainSystem.TerrainDoc.ApplyBulkImport(allChanges);
 
             TerrainSystem.DocumentManager.SkipDatStatics = true;
+            MarkOriginalStaticsRemoved();
 
             // Clear all landblock statics (active + inactive in DB) and delete all dungeon documents.
             await TerrainSystem.DocumentManager.ResetWorldDocumentsAsync();
 
             TerrainSystem.Scene.InvalidateStaticObjectsCache();
             TerrainSystem.Scene.ClearAllCaches();
+        }
+
+        /// <summary>
+        /// Removes the original DAT buildings and static objects from the whole world while
+        /// keeping everything the project placed (generated towns, hand-placed objects) and all
+        /// dungeons. Fixes original buildings left floating or buried after terrain changes.
+        /// </summary>
+        [RelayCommand]
+        private async Task RemoveOriginalStatics() {
+            if (TerrainSystem == null || _dats == null || IsReadOnlyProject) return;
+
+            var confirmed = await ShowConfirmation("Remove Original Buildings",
+                "This removes every building and static object that came from the original DAT, " +
+                "across the whole world.\n\nObjects you placed or generated are kept, and dungeons " +
+                "are not affected.\n\nThis cannot be undone.",
+                "Remove");
+            if (!confirmed) return;
+
+            var docManager = TerrainSystem.DocumentManager;
+            docManager.SkipDatStatics = true;
+            MarkOriginalStaticsRemoved();
+
+            var docIds = new HashSet<string>(await docManager.DocumentStorageService.GetDocumentIdsByPrefixAsync("landblock_"));
+            foreach (var docId in docManager.ActiveDocs.Keys) {
+                if (docId.StartsWith("landblock_")) docIds.Add(docId);
+            }
+
+            int removed = 0;
+            foreach (var docId in docIds) {
+                if (docManager.ActiveDocs.TryGetValue(docId, out var activeDoc)) {
+                    if (activeDoc is LandblockDocument active)
+                        removed += active.RemoveDatOriginals(_dats);
+                    continue;
+                }
+                // Not open: edit a detached copy and write it straight back to storage so the
+                // scene doesn't have to hold every saved landblock in memory.
+                var doc = await docManager.OpenDetachedAsync<LandblockDocument>(docId);
+                if (doc == null) continue;
+                removed += doc.RemoveDatOriginals(_dats);
+                await docManager.DocumentStorageService.UpdateDocumentAsync(docId, doc.SaveToProjection());
+            }
+
+            Console.WriteLine($"[RemoveOriginalStatics] Removed {removed} original objects from {docIds.Count} saved landblock(s)");
+
+            TerrainSystem.Scene.InvalidateStaticObjectsCache();
+            TerrainSystem.Scene.ClearAllCaches();
+        }
+
+        private void MarkOriginalStaticsRemoved() {
+            if (_project == null || _project.OriginalStaticsRemoved) return;
+            _project.OriginalStaticsRemoved = true;
+            _project.Save();
         }
 
         [RelayCommand]
@@ -913,11 +966,11 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
             TerrainSystem.Scene.InvalidateStaticObjectsCache();
             TerrainSystem.Scene.ClearAllCaches();
 
-            // Re-enable DAT static loading now that all generated documents are in place.
-            // Landblocks that received world gen content have projections saved, so they
-            // load from those projections and ignore this flag. Unvisited landblocks can
-            // again load their DAT statics normally.
-            TerrainSystem.DocumentManager.SkipDatStatics = false;
+            // Re-enable DAT static loading now that all generated documents are in place,
+            // unless the original statics were removed (Fresh Start / Remove Original
+            // Buildings). Landblocks that received world gen content have projections saved,
+            // so they load from those projections and ignore this flag.
+            TerrainSystem.DocumentManager.SkipDatStatics = _project?.OriginalStaticsRemoved == true;
 
             // Queue all new building + decoration models for warmup so they render
             var warmupIds = new HashSet<(uint id, bool isSetup)>();
@@ -1087,6 +1140,49 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
                 "0x{0:X8} [{1:F6} {2:F6} {3:F6}] 1.000000 0.000000 0.000000 0.000000",
                 fullId, localX, localY, worldZ);
             return (lbKey, outdoorCell, teleloc);
+        }
+
+        private async Task<bool> ShowConfirmation(string title, string message, string confirmText) {
+            bool confirmed = false;
+
+            await DialogHost.Show(new StackPanel {
+                Margin = new Avalonia.Thickness(20),
+                Spacing = 10,
+                Children = {
+                    new TextBlock {
+                        Text = title,
+                        FontSize = 16,
+                        FontWeight = FontWeight.Bold
+                    },
+                    new TextBlock {
+                        Text = message,
+                        TextWrapping = TextWrapping.Wrap,
+                        MaxWidth = 400,
+                        FontSize = 13,
+                        Opacity = 0.85
+                    },
+                    new StackPanel {
+                        Orientation = Avalonia.Layout.Orientation.Horizontal,
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        Spacing = 10,
+                        Children = {
+                            new Button {
+                                Content = "Cancel",
+                                Command = new RelayCommand(() => DialogHost.Close("MainDialogHost"))
+                            },
+                            new Button {
+                                Content = confirmText,
+                                Command = new RelayCommand(() => {
+                                    confirmed = true;
+                                    DialogHost.Close("MainDialogHost");
+                                })
+                            }
+                        }
+                    }
+                }
+            }, "MainDialogHost");
+
+            return confirmed;
         }
 
         private async Task<bool> ShowFreshStartConfirmation() {

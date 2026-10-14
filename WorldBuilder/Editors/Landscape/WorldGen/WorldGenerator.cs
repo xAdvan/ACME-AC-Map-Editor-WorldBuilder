@@ -32,7 +32,7 @@ namespace WorldBuilder.Editors.Landscape.WorldGen {
             int verticesY = regionH * 8 + 1;
 
             progress?.Invoke($"Generating elevation ({verticesX}x{verticesY} vertices, {p.ContinentCount} continents, {p.IslandCount} islands)...");
-            var elevation = HeightMapGenerator.Generate(effectiveParams, noise, verticesX, verticesY, rng, heightTable);
+            var elevation = HeightMapGenerator.Generate(effectiveParams, noise, verticesX, verticesY, rng, heightTable, out var distanceToSea);
 
             progress?.Invoke("Generating moisture map...");
             var moisture = HeightMapGenerator.GenerateMoisture(effectiveParams, noise, verticesX, verticesY);
@@ -52,7 +52,7 @@ namespace WorldBuilder.Editors.Landscape.WorldGen {
             }
 
             progress?.Invoke("Assigning biomes...");
-            BiomeMapper.Assign(elevation, moisture, seaLevelNorm,
+            BiomeMapper.Assign(elevation, moisture, distanceToSea, seaLevelNorm,
                 out var terrainTypes, out var sceneryIndices,
                 verticesX, verticesY);
 

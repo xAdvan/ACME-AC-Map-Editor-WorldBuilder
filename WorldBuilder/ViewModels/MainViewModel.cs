@@ -726,6 +726,13 @@ public partial class MainViewModel : ViewModelBase {
     }
 
     [RelayCommand]
+    private async Task LandscapeRemoveOriginalStatics() {
+        if (IsReadOnlyDatProject) return;
+        var le = GetLandscapeEditor();
+        if (le != null) await le.RemoveOriginalStaticsCommand.ExecuteAsync(null);
+    }
+
+    [RelayCommand]
     private async Task LandscapeImportHeightmap() {
         if (IsReadOnlyDatProject) return;
         var le = GetLandscapeEditor();
