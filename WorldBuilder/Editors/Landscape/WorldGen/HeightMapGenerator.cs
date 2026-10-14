@@ -12,15 +12,35 @@ namespace WorldBuilder.Editors.Landscape.WorldGen {
             public float Elongation;
         }
 
+        // Land is any vertex whose landmass influence exceeds this.
+        private const float LandThreshold = 0.02f;
+
+        // Coastal shaping, in vertices (one vertex = 24 world units).
+        // Target rise per vertex on walkable coasts; AC's walkable limit is ~48°
+        // (≈27 units per vertex), so this keeps beaches comfortably walkable.
+        private const float WalkableRisePerVertex = 12f;
+        private const float MinGentleRamp = 4f;
+        private const float MaxGentleRamp = 48f;
+        private const float CliffRamp = 1.5f;
+        private const float ShelfWidth = 12f;
+
         /// <summary>
         /// Generates an elevation map with distinct continents and islands.
         /// Uses domain warping and per-landmass noise for organic, non-circular shapes.
+        /// Coastlines rise gradually out of the sea along most of their length, with
+        /// occasional stretches of sea cliffs.
         /// </summary>
-        public static float[,] Generate(WorldGeneratorParams p, SimplexNoise noise, int verticesX, int verticesY, Random rng) {
+        public static float[,] Generate(WorldGeneratorParams p, SimplexNoise noise, int verticesX, int verticesY, Random rng, float[] landHeightTable) {
             var landmasses = PlaceLandmasses(p, verticesX, verticesY, rng);
             var map = new float[verticesX, verticesY];
+            var isLand = new bool[verticesX, verticesY];
             int noiseOffset = p.Seed * 1000;
+            float seaLevel = SeaLevelNormalized(p.SeaLevelIndex, landHeightTable);
 
+            // Edge falloff to prevent continent overflow beyond world boundary
+            int edgeMargin = Math.Max(verticesX, verticesY) / 20;
+
+            // Pass 1: inland elevation (the shape away from the coast) and the land mask.
             for (int x = 0; x < verticesX; x++) {
                 for (int y = 0; y < verticesY; y++) {
                     float wx = (p.StartX * 8 + x) * 0.005f + noiseOffset;
@@ -28,28 +48,127 @@ namespace WorldBuilder.Editors.Landscape.WorldGen {
 
                     float landInfluence = ComputeLandInfluence(x, y, landmasses, noise);
 
-                    // Edge falloff to prevent continent overflow beyond world boundary
-                    int edgeMargin = Math.Max(verticesX, verticesY) / 20;
                     int edgeDist = Math.Min(Math.Min(x, verticesX - 1 - x), Math.Min(y, verticesY - 1 - y));
                     if (edgeDist < edgeMargin)
                         landInfluence *= (float)edgeDist / edgeMargin;
 
-                    float detail = noise.FBM(wx * 2f, wy * 2f, 6, 0.45f + p.Roughness * 0.1f, 2.1f);
-                    float ridged = noise.RidgedNoise(wx * 1.5f + 500f, wy * 1.5f + 500f, 4, 0.5f, 2f);
-
-                    float elevation;
-                    if (landInfluence > 0.02f) {
+                    if (landInfluence > LandThreshold) {
+                        float detail = noise.FBM(wx * 2f, wy * 2f, 6, 0.45f + p.Roughness * 0.1f, 2.1f);
+                        float ridged = noise.RidgedNoise(wx * 1.5f + 500f, wy * 1.5f + 500f, 4, 0.5f, 2f);
                         float terrainVariation = 0.5f + detail * 0.25f + ridged * 0.2f;
-                        elevation = 0.12f + landInfluence * 0.65f * terrainVariation;
+                        map[x, y] = Math.Clamp(0.12f + landInfluence * 0.65f * terrainVariation, 0f, 1f);
+                        isLand[x, y] = true;
+                    }
+                }
+            }
+
+            // Pass 2: blend the inland shape down to sea level near the coast, using the
+            // true distance to the shoreline so slopes are controlled in world units.
+            var distToSea = DistanceTransform(isLand, sourceIsLand: false);
+            var distToLand = DistanceTransform(isLand, sourceIsLand: true);
+
+            float heightRange = landHeightTable[^1] - landHeightTable[0];
+            float mountainScale = Math.Max(p.MountainScale, 0.1f);
+            // Height of the shoreline itself: just above the waterline so the beach is dry land.
+            float shoreHeight = seaLevel + 0.004f;
+            // Kept small so float precision holds for any seed.
+            float coastOfs = (p.Seed % 1000) * 37f;
+
+            for (int x = 0; x < verticesX; x++) {
+                for (int y = 0; y < verticesY; y++) {
+                    float gx = p.StartX * 8 + x;
+                    float gy = p.StartY * 8 + y;
+
+                    if (isLand[x, y]) {
+                        float d = distToSea[x, y];
+                        float inland = map[x, y];
+                        if (d >= MaxGentleRamp + 2f || inland <= shoreHeight) continue;
+
+                        // Low-frequency noise picks which stretches of coast are cliffs,
+                        // with a band of steep-but-not-sheer coast between the two.
+                        float cliffNoise = (noise.FBM(gx * 0.008f + coastOfs + 9000f, gy * 0.008f + coastOfs + 9000f, 3, 0.5f, 2f) + 1f) * 0.5f;
+                        float cliffiness = SmoothStep(0.58f, 0.72f, cliffNoise);
+
+                        // Ramp wide enough that the rise from shore to inland stays walkable.
+                        float riseUnits = (inland - shoreHeight) * heightRange * mountainScale;
+                        float gentleRamp = Math.Clamp(riseUnits * 1.5f / WalkableRisePerVertex, MinGentleRamp, MaxGentleRamp);
+                        float widthVar = (noise.FBM(gx * 0.01f + coastOfs + 4000f, gy * 0.01f + coastOfs + 4000f, 2, 0.5f, 2f) + 1f) * 0.5f;
+                        gentleRamp = Math.Min(gentleRamp * (1f + widthVar * 0.5f), MaxGentleRamp);
+
+                        float ramp = Lerp(gentleRamp, CliffRamp, cliffiness);
+                        // Cliffs keep a narrow strip of beach at their foot.
+                        float beach = cliffiness * 1.5f;
+
+                        float w = SmoothStep(0f, ramp, d - beach);
+                        map[x, y] = Lerp(shoreHeight, inland, w);
                     } else {
-                        elevation = landInfluence * 0.5f + 0.01f * (detail + 1f);
+                        // Continental shelf: shallow near land, deepening offshore.
+                        float d = distToLand[x, y];
+                        float detail = noise.FBM(gx * 0.01f + coastOfs + 2000f, gy * 0.01f + coastOfs + 2000f, 3, 0.5f, 2f);
+                        float floor = seaLevel * (0.3f + 0.15f * (detail + 1f));
+                        float w = SmoothStep(0f, ShelfWidth, d);
+                        map[x, y] = Lerp(seaLevel * 0.9f, floor, w);
                     }
 
-                    map[x, y] = Math.Clamp(elevation, 0f, 1f);
+                    map[x, y] = Math.Clamp(map[x, y], 0f, 1f);
                 }
             }
 
             return map;
+        }
+
+        /// <summary>
+        /// Two-pass chamfer distance transform. Returns, for every vertex, the distance
+        /// (in vertices) to the nearest vertex whose land state equals <paramref name="sourceIsLand"/>.
+        /// Vertices of the source kind get 0.
+        /// </summary>
+        private static float[,] DistanceTransform(bool[,] isLand, bool sourceIsLand) {
+            int w = isLand.GetLength(0), h = isLand.GetLength(1);
+            const float Ortho = 1f, Diag = 1.41421356f;
+            var dist = new float[w, h];
+
+            for (int x = 0; x < w; x++)
+                for (int y = 0; y < h; y++)
+                    dist[x, y] = isLand[x, y] == sourceIsLand ? 0f : float.MaxValue;
+
+            // Forward pass
+            for (int x = 0; x < w; x++) {
+                for (int y = 0; y < h; y++) {
+                    float v = dist[x, y];
+                    if (v == 0f) continue;
+                    if (x > 0) {
+                        v = Math.Min(v, dist[x - 1, y] + Ortho);
+                        if (y > 0) v = Math.Min(v, dist[x - 1, y - 1] + Diag);
+                        if (y < h - 1) v = Math.Min(v, dist[x - 1, y + 1] + Diag);
+                    }
+                    if (y > 0) v = Math.Min(v, dist[x, y - 1] + Ortho);
+                    dist[x, y] = v;
+                }
+            }
+
+            // Backward pass
+            for (int x = w - 1; x >= 0; x--) {
+                for (int y = h - 1; y >= 0; y--) {
+                    float v = dist[x, y];
+                    if (v == 0f) continue;
+                    if (x < w - 1) {
+                        v = Math.Min(v, dist[x + 1, y] + Ortho);
+                        if (y > 0) v = Math.Min(v, dist[x + 1, y - 1] + Diag);
+                        if (y < h - 1) v = Math.Min(v, dist[x + 1, y + 1] + Diag);
+                    }
+                    if (y < h - 1) v = Math.Min(v, dist[x, y + 1] + Ortho);
+                    dist[x, y] = v;
+                }
+            }
+
+            return dist;
+        }
+
+        private static float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+        private static float SmoothStep(float edge0, float edge1, float x) {
+            float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+            return t * t * (3f - 2f * t);
         }
 
         /// <summary>
